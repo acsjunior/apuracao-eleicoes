@@ -50,10 +50,7 @@ def figura(votos: pd.DataFrame, situacao: pd.DataFrame, nivel: str, metrica: str
     chave, pct, nvotos, apurado, faltam = unidades(votos, situacao, nivel)
     ufs = list(CODIGO_UF.values())
     unidade = {uf: uf if chave == "uf" else tse.UF_REGIAO[uf.lower()] for uf in ufs}
-    # Sem votos ou com apuração inicial demais, a tendência não é confiável e o estado fica cinza.
-    sem_tendencia = (nvotos.sum(axis=1) == 0) | (apurado < tse.MIN_APURADO)
-    # Entre o mínimo e o pleno a cor é esmaecida em direção ao branco, proporcional à confiança.
-    confianca = ((apurado - tse.MIN_APURADO) / (tse.PLENO_APURADO - tse.MIN_APURADO)).clip(0, 1)
+    sem_votos = nvotos.sum(axis=1) == 0  # só estes ficam cinza; o aviso de apuração parcial vai no hover
 
     ranking = list(nvotos.sum().sort_values(ascending=False).index)
     listados = ranking[:4]  # no 1º turno são 11 candidatos; o resto vai agregado em "Demais"
@@ -77,16 +74,13 @@ def figura(votos: pd.DataFrame, situacao: pd.DataFrame, nivel: str, metrica: str
         escala, zmin, zmax = [[0, "#f0fdf4"], [1, "#15803d"]], 0, 100
         colorbar = dict(title="% apurado")
     elif metrica == "% de um candidato":
-        z = [None if sem_tendencia[unidade[uf]] else pct.loc[unidade[uf], candidato] for uf in ufs]
+        z = [None if sem_votos[unidade[uf]] else pct.loc[unidade[uf], candidato] for uf in ufs]
         escala, zmin, zmax = [[0, "#ffffff"], [1, tse.cor(candidato)]], 0, 100
         colorbar = dict(title=f"% {candidato}")
     else:
         # Dois líderes nacionais, em ordem alfabética para as cores não trocarem durante a apuração.
         a, b = sorted(nvotos.sum().nlargest(2).index)
-        z = [
-            None if sem_tendencia[u] else (pct.loc[u, a] - pct.loc[u, b]) * confianca[u]
-            for u in (unidade[uf] for uf in ufs)
-        ]
+        z = [None if sem_votos[u] else pct.loc[u, a] - pct.loc[u, b] for u in (unidade[uf] for uf in ufs)]
         escala, zmin, zmax = [[0, tse.cor(b)], [0.5, "#ffffff"], [1, tse.cor(a)]], -MARGEM_MAX, MARGEM_MAX
         colorbar = dict(
             title="Vantagem (p.p.)",

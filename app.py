@@ -228,8 +228,7 @@ def painel() -> None:
     if pct_secoes < tse.PLENO_APURADO:
         st.warning(
             f"**Apuração em fase inicial ({fmt_pct(pct_secoes)} das seções).** Os percentuais ainda não representam o resultado "
-            "final: a ordem em que as urnas chegam favorece alguns estados e regiões. "
-            f"No mapa, estados com menos de {tse.MIN_APURADO}% apurados ficam sem cor."
+            "final: a ordem em que as urnas chegam favorece alguns estados e regiões."
         )
     destaque(votos, br, pct_secoes, turno)
     ufs = votos[votos.regiao != "Brasil"]
@@ -247,8 +246,8 @@ def painel() -> None:
         st.caption("Exterior (fora do mapa): " + " · ".join(f"{c.candidato} {c.votos:,}".replace(",", ".") for c in exterior.itertuples()))
         if metrica == "Líder e margem":
             st.caption(
-                f"Cor saturada quando a vantagem chega a {mapa.MARGEM_MAX} p.p. Estados com menos de {tse.MIN_APURADO}% das seções "
-                f"apuradas ficam cinza; entre {tse.MIN_APURADO}% e {tse.PLENO_APURADO}% a cor é esmaecida, pois a tendência ainda é pouco confiável."
+                f"Cor saturada quando a vantagem chega a {mapa.MARGEM_MAX} p.p. Estados sem nenhum voto apurado ficam cinza. "
+                "Passe o mouse sobre o estado para ver o quanto já foi apurado."
             )
 
     with aba_br:
