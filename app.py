@@ -1,4 +1,5 @@
 import html
+from datetime import datetime
 
 import httpx
 import pandas as pd
@@ -16,15 +17,106 @@ def eleicoes() -> list[dict]:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def coletar(turno: dict):
+def coletar(turno: dict) -> tuple[tse.Apuracao, datetime]:
     """Uma única consulta ao TSE a cada 30s, compartilhada por todos os visitantes."""
-    return tse.coletar(turno)
+    return tse.coletar(turno), datetime.now(tse.FUSO)
+
+
+@st.cache_resource
+def _ultimo_ok() -> dict:
+    return {}
+
+
+def obter(turno: dict) -> tuple[tuple[tse.Apuracao, datetime], Exception | None]:
+    """Dados do TSE; se a consulta falhar, devolve o último resultado bom junto com o erro."""
+    try:
+        resultado = coletar(turno)
+    except Exception as e:  # noqa: BLE001 - qualquer falha cai no último dado bom, se houver
+        guardado = _ultimo_ok().get(turno["cd"])
+        if guardado is None:
+            raise
+        return guardado, e
+    _ultimo_ok()[turno["cd"]] = resultado
+    return resultado, None
+
+
+def fmt_int(n: float) -> str:
+    return f"{int(n):,}".replace(",", ".")
+
+
+def fmt_pct(x: float, casas: int = 2) -> str:
+    return f"{x:.{casas}f}%"
+
+
+def idade(minutos: float) -> str:
+    if minutos < 1:
+        return "agora há pouco"
+    if minutos < 60:
+        return f"há {int(minutos)} min"
+    return f"há {int(minutos // 60)}h{int(minutos % 60):02d}"
+
+
+def descricao_falha(e: Exception) -> str:
+    if isinstance(e, tse.FormatoInesperado):
+        return str(e)
+    if isinstance(e, httpx.HTTPError):
+        return "sem conexão com o TSE"
+    return f"{type(e).__name__}: {e}"
+
+
+def destaque(votos: pd.DataFrame, br: pd.Series, pct_secoes: float, turno: dict) -> None:
+    """Quem lidera, situação oficial (eleito / 2º turno) e, no 2º turno, a estimativa do que falta."""
+    nacional = votos[votos.regiao == "Brasil"]
+    total = tse.resumir(nacional, None).sort_values("votos", ascending=False)
+    status = dict(zip(nacional.candidato, nacional.status))
+    definidos = [c for c in total.candidato if status.get(c) not in (None, "", "Não eleito")]
+
+    def nome(c: str) -> str:
+        return f"<span style='color:{tse.cor(c)}'>{html.escape(c)}</span>"
+
+    with st.container(border=True):
+        if definidos:
+            for c in definidos:
+                st.markdown(f"### {'🏆' if status[c] == 'Eleito' else '➡️'} {nome(c)} — {status[c]}", unsafe_allow_html=True)
+            st.caption("Situação divulgada pelo TSE.")
+            return
+        if total.votos.sum() == 0 or len(total) < 2:
+            st.markdown("### Aguardando os primeiros resultados")
+            return
+        lider, segundo = total.iloc[0], total.iloc[1]
+        vantagem = int(lider.votos - segundo.votos)
+        if vantagem == 0:
+            st.markdown("### Empate técnico entre os dois primeiros colocados")
+        else:
+            st.markdown(
+                f"### {nome(lider.candidato)} lidera por {fmt_int(vantagem)} votos ({lider.pct - segundo.pct:.2f} p.p. sobre {nome(segundo.candidato)})",
+                unsafe_allow_html=True,
+            )
+        if turno["turno"] != 2:
+            return
+        if pct_secoes < tse.PLENO_APURADO:
+            st.caption(f"A estimativa de votos restantes aparece a partir de {tse.PLENO_APURADO}% das seções apuradas.")
+            return
+        proj = tse.projecao(total, br)
+        if proj is None:
+            return
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Votos válidos restantes (estimativa)", fmt_int(proj["restantes"]))
+        if proj["precisa"] >= 1:
+            c2.metric(f"Para virar, {proj['segundo']} precisaria de", "mais votos do que restam")
+            c3.metric("Situação (estimativa)", "Vantagem irreversível")
+        else:
+            c2.metric(f"Para virar, {proj['segundo']} precisa de", f"{proj['precisa'] * 100:.1f}% dos restantes")
+        st.caption(
+            "Estimativa própria, não oficial: supõe que as urnas ainda não apuradas têm o mesmo comparecimento e a mesma "
+            "proporção de votos válidos das já apuradas."
+        )
 
 
 def cartoes(df: pd.DataFrame) -> None:
-    df = df.sort_values("votos", ascending=False)
+    df = df.sort_values("votos", ascending=False).head(4)
     for col, (_, c) in zip(st.columns(len(df)), df.iterrows()):
-        col.metric(f"{c.candidato} ({c.partido})", f"{c.votos:,}".replace(",", "."), f"{c.pct:.2f}%", delta_color="off")
+        col.metric(f"{c.candidato} ({c.partido})", fmt_int(c.votos), fmt_pct(c.pct), delta_color="off")
 
 
 def pivot(df: pd.DataFrame, chave: str, ordem: list[str] | None = None) -> pd.DataFrame:
@@ -98,17 +190,48 @@ with st.sidebar:
 @st.fragment(run_every=intervalo)
 def painel() -> None:
     try:
-        votos, situacao, horario = coletar(turno)
-    except Exception as e:  # noqa: BLE001 - mostrar qualquer falha de rede ao usuário
-        st.error(f"Falha ao consultar o TSE: {e}")
+        (apuracao, consultado_em), falha = obter(turno)
+    except FileNotFoundError as e:
+        st.warning(str(e))
         return
-    if votos.empty:
-        st.warning("O TSE ainda não publicou resultados para este turno.")
+    except Exception as e:  # noqa: BLE001 - sem dado anterior para exibir, mostrar a falha
+        st.error(f"Não foi possível obter os dados do TSE: {descricao_falha(e)}")
         return
+    votos, situacao = apuracao.votos, apuracao.situacao
 
     br = situacao[situacao.uf == "BR"].iloc[0]
+    pct_secoes = br.secoes_totalizadas / br.secoes_totais * 100 if br.secoes_totais else 0
+    agora = datetime.now(tse.FUSO)
+
     st.title(f"🗳️ Apuração Presidencial — {turno['turno']}º turno")
-    st.caption(f"Atualização do TSE: {horario}  ·  consultado a cada {intervalo}s")
+    if apuracao.publicado_em:
+        minutos = (agora - apuracao.publicado_em).total_seconds() / 60
+        st.caption(
+            f"Atualização do TSE: {apuracao.publicado_em:%d/%m/%Y %H:%M:%S} ({idade(minutos)})  ·  "
+            f"consultado às {consultado_em:%H:%M:%S}, a cada {intervalo}s"
+        )
+        if pct_secoes < 100 and minutos > 20:
+            st.warning(
+                f"O TSE não publica uma atualização {idade(minutos)} (última às {apuracao.publicado_em:%H:%M}). "
+                "Os números abaixo podem estar desatualizados."
+            )
+    if falha:
+        st.warning(
+            f"⚠ Não consegui consultar o TSE agora ({descricao_falha(falha)}). "
+            f"Exibindo o último resultado obtido às {consultado_em:%H:%M:%S}."
+        )
+    if apuracao.ausentes:
+        st.warning(
+            "O TSE ainda não publicou os arquivos de: " + ", ".join(apuracao.ausentes)
+            + ". Os totais por região e por estado podem estar incompletos (o total do Brasil vem do arquivo nacional)."
+        )
+    if pct_secoes < tse.PLENO_APURADO:
+        st.warning(
+            f"**Apuração em fase inicial ({fmt_pct(pct_secoes)} das seções).** Os percentuais ainda não representam o resultado "
+            "final: a ordem em que as urnas chegam favorece alguns estados e regiões. "
+            f"No mapa, estados com menos de {tse.MIN_APURADO}% apurados ficam sem cor."
+        )
+    destaque(votos, br, pct_secoes, turno)
     ufs = votos[votos.regiao != "Brasil"]
     aba_br, aba_mapa, aba_reg, aba_uf = st.tabs(["Brasil", "Mapa", "Regiões", "Estados"])
 
@@ -123,10 +246,12 @@ def painel() -> None:
         exterior = votos[votos.regiao == "Exterior"].sort_values("votos", ascending=False)
         st.caption("Exterior (fora do mapa): " + " · ".join(f"{c.candidato} {c.votos:,}".replace(",", ".") for c in exterior.itertuples()))
         if metrica == "Líder e margem":
-            st.caption(f"Cor saturada quando a vantagem chega a {mapa.MARGEM_MAX} p.p. Estados sem votos apurados ficam cinza.")
+            st.caption(
+                f"Cor saturada quando a vantagem chega a {mapa.MARGEM_MAX} p.p. Estados com menos de {tse.MIN_APURADO}% das seções "
+                f"apuradas ficam cinza; entre {tse.MIN_APURADO}% e {tse.PLENO_APURADO}% a cor é esmaecida, pois a tendência ainda é pouco confiável."
+            )
 
     with aba_br:
-        pct_secoes = br.secoes_totalizadas / br.secoes_totais * 100 if br.secoes_totais else 0
         a, b, c = st.columns(3)
         a.metric("Seções apuradas", f"{br.secoes_totalizadas:,}".replace(",", "."), f"de {br.secoes_totais:,}".replace(",", "."), delta_color="off")
         b.metric("% apurado", f"{pct_secoes:.2f}%")
@@ -135,6 +260,8 @@ def painel() -> None:
         st.divider()
         total = tse.resumir(votos[votos.regiao == "Brasil"], None)
         cartoes(total)
+        if len(total) > 4:
+            st.caption("Cartões dos 4 mais votados; o gráfico mostra todos os candidatos.")
         st.bar_chart(total.assign(cor=total.candidato.map(tse.cor)), x="candidato", y="votos", color="cor", horizontal=True)
         st.caption(f"Brancos: {br.brancos:,} · Nulos: {br.nulos:,}".replace(",", "."))
 
@@ -154,6 +281,13 @@ def painel() -> None:
         ordem = sorted(por_uf.uf.unique())
         tab = pivot(por_uf, "uf", ordem).merge(progresso(situacao, "uf"), on="uf")
         tabela_html(tab, "uf", "UF", altura=800)
+
+    st.divider()
+    st.caption(
+        "Painel independente e **não oficial**. Dados: Tribunal Superior Eleitoral "
+        "([resultados.tse.jus.br](https://resultados.tse.jus.br)); malha dos estados: IBGE. "
+        "Para o resultado oficial, consulte sempre o portal do TSE."
+    )
 
 
 painel()
