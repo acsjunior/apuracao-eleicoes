@@ -1,0 +1,12 @@
+[project]
+name = "apuracao-eleicoes"
+version = "0.1.0"
+description = "Painel em tempo real da apuração presidencial (dados públicos do TSE)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.1",
+    "pandas>=3.1.0",
+    "plotly>=7.1.0",
+    "streamlit>=1.66.1",
+]
